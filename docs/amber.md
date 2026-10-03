@@ -90,6 +90,29 @@ The rules land in `system_ext_sepolicy.cil` via
 assertions are off in this GSI (`device/phh/treble/base.mk` sets
 `SELINUX_IGNORE_NEVERALLOWS := true`), so the attribute change builds.
 
+## Who drives the LEDs
+
+The vendor lights HAL (`android.hardware.lights-service.mediatek`, MediaTek's
+liblights with Daylight's amber addition) takes the mix from the alpha byte of
+the backlight color it receives from the framework:
+
+```
+white = brightness * (255 - alpha) / 255     (at least 1 while brightness > 0)
+amber = brightness - white                   (at least 1 while brightness > 0)
+```
+
+It has no other input: the binary imports no property or file-read functions.
+Stock AOSP always sends alpha `0xff`, which is why an unpatched framework
+lights amber only.
+
+| `ro.dc1.amber.driver` | `dc1_amber_driver` setting | Who writes the LED nodes |
+|---|---|---|
+| `framework` (set in `common.mk`) | unset | The HAL. `patches/frameworks_base__0002-*` makes `LightsService` send `screen_brightness_amber_rate` as the alpha byte and re-send it when the setting changes. AmberControl only owns the setting and its UI |
+| `framework` | `app` | AmberControl, as described in the sections below. Live switch for comparison: `adb shell settings put system dc1_amber_driver app` |
+| unset | any | AmberControl |
+
+The sections below describe the `app` driver.
+
 ## How the frontlight actually works (verified on hardware)
 
 Mapped live on the device, 2026-08-24, with the kernel log as the instrument
