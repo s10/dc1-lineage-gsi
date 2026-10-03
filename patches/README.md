@@ -17,8 +17,13 @@ Patch files are named `<project-path-underscores>__<NNNN>-description.patch`
 runner and CI apply every `*.patch` in this directory after the upstream
 patch layers, mapping `<project-path>` back to tree paths.
 
-Current contents: `device_phh_treble__0001-dc1-include-vendor-dc1.patch`
-(appends our `vendor/dc1/common.mk` inherit to `lineage_arm64_bvN4.mk`).
+Current contents:
+
+| Patch | What it does |
+|---|---|
+| `device_phh_treble__0001-dc1-include-vendor-dc1.patch` | appends our `vendor/dc1/common.mk` inherit to `lineage_arm64_bvN4.mk` |
+| `vendor_lineage__0001-drop-bootanimation-dark-symlink.patch` | drops the dark boot animation symlink |
+| `frameworks_base__0001-dc1-amber-slider-in-qs.patch` | adds the amber warmth slider under the brightness slider in the Quick-Settings panel (SystemUI); the logic is in a new file, the upstream panel file gets a nine-line change |
 
 ## Adding a patch
 
