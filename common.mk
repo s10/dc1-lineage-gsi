@@ -56,7 +56,7 @@ SYSTEM_EXT_PRIVATE_SEPOLICY_DIRS += vendor/dc1/sepolicy
 PRODUCT_PACKAGES += \
     DC1Overlay
 
-# --- Hardware buttons: KEY_F11 (orange, side) + KEY_F12 (top) ---------------
+# --- Hardware buttons: KEY_F11 (side) + KEY_F12 (top) -----------------------
 # Neither keycode has a default action in AOSP or LineageOS; on stock they
 # only worked because Daylight's own system apps listened for them, so on a
 # GSI both buttons are inert from the flash. DC1KeyHandler is loaded by

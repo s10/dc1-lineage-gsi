@@ -56,8 +56,8 @@ Besides power and volume the DC-1 has two buttons, both on `mtk-kpd`
 
 | button | scancode | keycode | stock behaviour |
 |---|---|---|---|
-| orange, side | 87 | `KEY_F11` (141) | a toast, "Walkie-Talkie assistant is coming soon!" — a stub for an unshipped feature |
-| top | 88 | `KEY_F12` (142) | launch Noteshelf 2, else Noteshelf 3, else "No note-taking app found" |
+| side orange button | 87 | `KEY_F11` (141) | a toast, "Walkie-Talkie assistant is coming soon!" — a stub for an unshipped feature |
+| top orange button | 88 | `KEY_F12` (142) | launch Noteshelf 2, else Noteshelf 3, else "No note-taking app found" |
 
 Neither keycode has a default action in AOSP or LineageOS, so on a GSI both go
 inert unless something handles them: see [`docs/buttons.md`](buttons.md).

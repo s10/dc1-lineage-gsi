@@ -16,19 +16,27 @@
 
 package com.dc1.keyhandler;
 
-import android.content.ActivityNotFoundException;
+import android.app.ActivityManager;
+import android.app.SearchManager;
+import android.app.role.RoleManager;
+import android.content.ContentResolver;
 import android.content.Context;
 import android.content.Intent;
+import android.database.ContentObserver;
+import android.os.Bundle;
 import android.os.Handler;
 import android.os.HandlerThread;
 import android.os.PowerManager;
-import android.os.SystemProperties;
 import android.os.UserHandle;
 import android.provider.Settings;
 import android.util.Slog;
 import android.view.KeyEvent;
+import android.view.ViewConfiguration;
 
+import com.android.internal.display.BrightnessSynchronizer;
 import com.android.internal.os.DeviceKeyHandler;
+
+import java.util.List;
 
 /**
  * Restores the DC-1's two physical buttons on a GSI.
@@ -40,157 +48,231 @@ import com.android.internal.os.DeviceKeyHandler;
  * com.daylightcomputer.systemrunner's KeyHandler, which a GSI replaces, so
  * both buttons are inert from the flash onwards.
  *
- * What stock did (recovered from the stock OTA's SystemRunner.apk,
- * KeyHandler.handleKeyEvent, resolved against bytecode offsets — the branch
- * targets invert the obvious reading order, so the disassembly listing alone
- * attributes the wrong action to each key):
+ * Each button has a short-press and a long-press action, picked in
+ * ButtonsSettingsActivity. The defaults:
  *
- *   F11 (orange, side) -> a toast, "Walkie-Talkie assistant is coming soon!",
- *                         a stub for a feature Daylight never shipped.
- *   F12 (top)          -> handleTopButton(): launch com.fluidtouch.noteshelf2,
- *                         else noteshelf3, else "No note-taking app found".
- *
- * F11 therefore has no real behaviour to preserve and is bound here to the
- * amber frontlight toggle — a physical control findable in the dark beats the
- * QS tile on a bedside reader. It drives AmberControl's own source of truth
- * (the Settings.System key), so there is no second mechanism to keep in sync.
- *
- * F12 generalises what stock hardcoded: an explicit override if set, else
- * Android's Notes role (whatever the user's default notes app is), else the
- * two Noteshelf packages for stock parity.
+ *   F11 (side)         -> short press: open the user's digital assistant,
+ *                         the same way a long-press on home does.
+ *                         long press: turn the frontlight off, or back on at
+ *                         the brightness it had.
+ *   F12 (top)          -> short press: open the app that holds the Notes role.
  */
 public class KeyHandler implements DeviceKeyHandler {
 
     private static final String TAG = "DC1KeyHandler";
 
-    /** Orange side button. */
-    private static final int KEY_AMBER_TOGGLE = KeyEvent.KEYCODE_F11;
-    /** Top button. */
-    private static final int KEY_NOTES = KeyEvent.KEYCODE_F12;
+    /** Side orange button. */
+    private static final int KEY_SIDE = KeyEvent.KEYCODE_F11;
+    /** Top orange button. */
+    private static final int KEY_TOP = KeyEvent.KEYCODE_F12;
 
-    /** Remembers the warmth to come back to when toggling amber back on. */
-    private static final String SETTING_LAST_RATE = "dc1_amber_last_rate";
-    /** Optional explicit target for the top button; unset = Notes role. */
-    private static final String SETTING_NOTES_PACKAGE = "dc1_notes_package";
-
-    private static final String[] STOCK_NOTES_PACKAGES = {
-        "com.fluidtouch.noteshelf2",
-        "com.fluidtouch.noteshelf3",
-    };
+    /** Brightness to come back to when the frontlight is turned on again. */
+    private static final String SETTING_SAVED_BRIGHTNESS = "dc1_frontlight_saved_brightness";
+    /** The lights HAL disables both LED drivers at this level. */
+    private static final int BRIGHTNESS_OFF = 1;
 
     private final Context mContext;
+    private final ContentResolver mResolver;
     private final PowerManager mPowerManager;
     private final Handler mHandler;
+    private final Runnable mSideLongPress = () -> run(ButtonConfig.SIDE_LONG);
+    private final Runnable mTopLongPress = () -> run(ButtonConfig.TOP_LONG);
 
-    private final String mAmberSetting;
-    private final int mAmberMax;
+    // Last key down, passed on to the assistant. Handler thread only.
+    private int mDownDeviceId;
+    private long mDownTime;
 
     public KeyHandler(Context context) {
         mContext = context;
+        mResolver = context.getContentResolver();
         mPowerManager = context.getSystemService(PowerManager.class);
-
-        // Same knobs the product fragment configures AmberControl with, so the
-        // button can never disagree with the app about scale or key name.
-        mAmberSetting = SystemProperties.get("ro.dc1.amber.setting",
-                "screen_brightness_amber_rate");
-        mAmberMax = SystemProperties.getInt("ro.dc1.amber.max", 1023);
 
         HandlerThread thread = new HandlerThread("DC1KeyHandler");
         thread.start();
         mHandler = new Handler(thread.getLooper());
+
+        mResolver.registerContentObserver(
+                Settings.System.getUriFor(Settings.System.SCREEN_BRIGHTNESS), false,
+                new ContentObserver(mHandler) {
+                    @Override
+                    public void onChange(boolean selfChange) {
+                        forgetSavedBrightnessIfLit();
+                    }
+                }, UserHandle.USER_ALL);
     }
 
     @Override
     public KeyEvent handleKeyEvent(KeyEvent event) {
         final int keyCode = event.getKeyCode();
-        if (keyCode != KEY_AMBER_TOGGLE && keyCode != KEY_NOTES) {
+        if (keyCode != KEY_SIDE && keyCode != KEY_TOP) {
             return event;
         }
 
-        // Consume both halves of the press so the keycodes never reach apps,
-        // but act once, on the initial down.
-        if (event.getAction() == KeyEvent.ACTION_DOWN && event.getRepeatCount() == 0
+        // Consume every event of both keys so the keycodes never reach apps.
+        // The work runs on the handler thread, never on the input thread.
+        final boolean side = keyCode == KEY_SIDE;
+        final int action = event.getAction();
+        if (action == KeyEvent.ACTION_DOWN && event.getRepeatCount() == 0
                 && mPowerManager.isInteractive()) {
-            // Never do work on the input thread.
-            mHandler.post(keyCode == KEY_AMBER_TOGGLE ? this::toggleAmber : this::openNotes);
+            final int deviceId = event.getDeviceId();
+            final long eventTime = event.getEventTime();
+            mHandler.post(() -> onDown(side, deviceId, eventTime));
+        } else if (action == KeyEvent.ACTION_UP) {
+            final boolean canceled = event.isCanceled();
+            mHandler.post(() -> onUp(side, canceled));
         }
         return null;
     }
 
-    /**
-     * Toggle the frontlight between off and the last warmth used.
-     *
-     * AmberControl owns the mix; this only moves its input, so auto-discovery,
-     * the channel model and the watchdog all keep applying.
-     */
-    private void toggleAmber() {
-        final int current = getSetting(mAmberSetting, mAmberMax);
-        final int next;
-        if (current > 0) {
-            putSetting(SETTING_LAST_RATE, current);
-            next = 0;
+    private void onDown(boolean side, int deviceId, long eventTime) {
+        mDownDeviceId = deviceId;
+        mDownTime = eventTime;
+        final int shortSlot = side ? ButtonConfig.SIDE_SHORT : ButtonConfig.TOP_SHORT;
+        final int longSlot = side ? ButtonConfig.SIDE_LONG : ButtonConfig.TOP_LONG;
+        if (ButtonConfig.NONE.equals(action(longSlot))) {
+            // No long press to wait for: act on the press, not on the release.
+            run(shortSlot);
         } else {
-            final int remembered = getSetting(SETTING_LAST_RATE, mAmberMax);
-            next = remembered > 0 ? remembered : mAmberMax;
+            mHandler.postDelayed(side ? mSideLongPress : mTopLongPress,
+                    ViewConfiguration.getLongPressTimeout());
         }
-        putSetting(mAmberSetting, next);
-        Slog.i(TAG, "orange button -> " + mAmberSetting + "=" + next);
     }
 
-    /** Open the user's notes app, mirroring what the top button did on stock. */
+    private void onUp(boolean side, boolean canceled) {
+        final Runnable longPress = side ? mSideLongPress : mTopLongPress;
+        if (!mHandler.hasCallbacks(longPress)) {
+            return;
+        }
+        // Released before the long press fired: it was a short press.
+        mHandler.removeCallbacks(longPress);
+        if (!canceled) {
+            run(side ? ButtonConfig.SIDE_SHORT : ButtonConfig.TOP_SHORT);
+        }
+    }
+
+    private String action(int slot) {
+        return ButtonConfig.get(mResolver, slot, ActivityManager.getCurrentUser());
+    }
+
+    private void run(int slot) {
+        final String action = action(slot);
+        Slog.i(TAG, "slot " + slot + " -> " + action);
+        if (action.startsWith(ButtonConfig.APP_PREFIX)) {
+            openApp(action.substring(ButtonConfig.APP_PREFIX.length()));
+            return;
+        }
+        switch (action) {
+            case ButtonConfig.ASSISTANT:
+                launchAssistant();
+                break;
+            case ButtonConfig.FRONTLIGHT:
+                toggleFrontlight();
+                break;
+            case ButtonConfig.NOTES:
+                openNotes();
+                break;
+            default:
+                break;
+        }
+    }
+
+    /** On or off is read from the brightness itself, there is no separate flag. */
+    private void toggleFrontlight() {
+        final int current = getSetting(Settings.System.SCREEN_BRIGHTNESS, BRIGHTNESS_OFF);
+        final int next;
+        if (current > BRIGHTNESS_OFF) {
+            putSetting(SETTING_SAVED_BRIGHTNESS, current);
+            next = BRIGHTNESS_OFF;
+        } else {
+            final int saved = getSetting(SETTING_SAVED_BRIGHTNESS, 0);
+            next = saved > BRIGHTNESS_OFF ? saved : defaultBrightness();
+            clearSavedBrightness();
+        }
+        putSetting(Settings.System.SCREEN_BRIGHTNESS, next);
+        Slog.i(TAG, "frontlight -> screen_brightness=" + next);
+    }
+
+    /** The user moved the brightness slider while the light was off. */
+    private void forgetSavedBrightnessIfLit() {
+        if (getSetting(Settings.System.SCREEN_BRIGHTNESS, BRIGHTNESS_OFF) > BRIGHTNESS_OFF
+                && getSetting(SETTING_SAVED_BRIGHTNESS, 0) > 0) {
+            clearSavedBrightness();
+        }
+    }
+
+    private int defaultBrightness() {
+        final int def = BrightnessSynchronizer.brightnessFloatToInt(
+                mPowerManager.getBrightnessConstraint(
+                        PowerManager.BRIGHTNESS_CONSTRAINT_TYPE_DEFAULT));
+        return Math.max(def, BRIGHTNESS_OFF + 1);
+    }
+
+    /** Same path as PhoneWindowManager.launchAssistAction: the assistant role decides. */
+    private void launchAssistant() {
+        if (Settings.Secure.getIntForUser(mResolver, Settings.Secure.USER_SETUP_COMPLETE, 0,
+                UserHandle.USER_CURRENT) == 0) {
+            return;
+        }
+        final SearchManager searchManager = mContext.getSystemService(SearchManager.class);
+        if (searchManager == null) {
+            Slog.w(TAG, "assistant: no SearchManager");
+            return;
+        }
+        final Bundle args = new Bundle();
+        args.putInt(Intent.EXTRA_ASSIST_INPUT_DEVICE_ID, mDownDeviceId);
+        args.putLong(Intent.EXTRA_TIME, mDownTime);
+        try {
+            searchManager.launchAssist(args);
+        } catch (RuntimeException e) {
+            Slog.w(TAG, "assistant failed", e);
+        }
+    }
+
+    /** Does nothing when no app holds the Notes role. */
     private void openNotes() {
-        final String override = Settings.System.getStringForUser(
-                mContext.getContentResolver(), SETTING_NOTES_PACKAGE,
-                UserHandle.USER_CURRENT);
-        if (override != null && !override.isEmpty() && launchPackage(override)) {
-            return;
-        }
-
-        // The Notes role: routes to whatever the user set as their notes app.
-        final Intent createNote = new Intent(Intent.ACTION_CREATE_NOTE)
-                .addFlags(Intent.FLAG_ACTIVITY_NEW_TASK);
-        if (startActivity(createNote, "CREATE_NOTE (notes role)")) {
-            return;
-        }
-
-        for (String pkg : STOCK_NOTES_PACKAGES) {
-            if (launchPackage(pkg)) {
+        final UserHandle user = UserHandle.of(ActivityManager.getCurrentUser());
+        try {
+            final List<String> holders = mContext.getSystemService(RoleManager.class)
+                    .getRoleHoldersAsUser(RoleManager.ROLE_NOTES, user);
+            if (holders.isEmpty()) {
+                Slog.i(TAG, "notes: no notes app is set");
                 return;
             }
+            final Intent intent = new Intent(Intent.ACTION_CREATE_NOTE)
+                    .setPackage(holders.get(0))
+                    .addFlags(Intent.FLAG_ACTIVITY_NEW_TASK);
+            mContext.startActivityAsUser(intent, user);
+        } catch (RuntimeException e) {
+            Slog.w(TAG, "notes failed", e);
         }
-        Slog.i(TAG, "top button -> no note-taking app found");
     }
 
-    private boolean launchPackage(String packageName) {
-        final Intent intent = mContext.getPackageManager()
-                .getLaunchIntentForPackage(packageName);
-        if (intent == null) {
-            return false;
-        }
-        intent.addFlags(Intent.FLAG_ACTIVITY_NEW_TASK);
-        return startActivity(intent, packageName);
-    }
-
-    private boolean startActivity(Intent intent, String what) {
+    private void openApp(String packageName) {
+        final UserHandle user = UserHandle.of(ActivityManager.getCurrentUser());
         try {
-            mContext.startActivityAsUser(intent, UserHandle.CURRENT);
-            Slog.i(TAG, "top button -> " + what);
-            return true;
-        } catch (ActivityNotFoundException e) {
-            return false;
-        } catch (Exception e) {
-            Slog.w(TAG, "top button -> " + what + " failed", e);
-            return false;
+            final Intent launch = mContext.createContextAsUser(user, 0)
+                    .getPackageManager().getLaunchIntentForPackage(packageName);
+            if (launch == null) {
+                Slog.i(TAG, "app: " + packageName + " has no launcher activity");
+                return;
+            }
+            launch.addFlags(Intent.FLAG_ACTIVITY_NEW_TASK);
+            mContext.startActivityAsUser(launch, user);
+        } catch (RuntimeException e) {
+            Slog.w(TAG, "app: " + packageName + " failed", e);
         }
     }
 
     private int getSetting(String key, int def) {
-        return Settings.System.getIntForUser(mContext.getContentResolver(), key, def,
-                UserHandle.USER_CURRENT);
+        return Settings.System.getIntForUser(mResolver, key, def, UserHandle.USER_CURRENT);
     }
 
     private void putSetting(String key, int value) {
-        Settings.System.putIntForUser(mContext.getContentResolver(), key, value,
+        Settings.System.putIntForUser(mResolver, key, value, UserHandle.USER_CURRENT);
+    }
+
+    private void clearSavedBrightness() {
+        Settings.System.putStringForUser(mResolver, SETTING_SAVED_BRIGHTNESS, null,
                 UserHandle.USER_CURRENT);
     }
 }

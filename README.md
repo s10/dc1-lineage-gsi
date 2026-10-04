@@ -36,7 +36,7 @@ Full rationale: [`docs/rom-choice.md`](docs/rom-choice.md).
 | Amber mix through the lights HAL | `LightsService` patch: the framework sends the amber rate to the vendor lights HAL, so there is a single writer of the LED nodes | `patches/frameworks_base__0002-dc1-amber-rate-as-backlight-alpha.patch` |
 | SELinux | lets the amber app (`platform_app` domain) read/write `sysfs_leds` under enforcing policy — TE allow plus `mlstrustedobject` on `sysfs_leds`, see [`docs/amber.md`](docs/amber.md) | `sepolicy/dc1amber.te` |
 | Priv-app permission | allows `WRITE_SETTINGS` to the amber app | `privapp-permissions-dc1.xml` |
-| Hardware buttons | `DeviceKeyHandler` restoring the two dead physical buttons: orange (`KEY_F11`) toggles the amber frontlight, top (`KEY_F12`) opens the Notes-role app — neither keycode has a default action in AOSP/LineageOS, see [`docs/buttons.md`](docs/buttons.md) | `DC1KeyHandler/`, `overlay-lineage/` |
+| Hardware buttons | `DeviceKeyHandler` restoring the two dead orange buttons: by default the side orange button (`KEY_F11`) opens the digital assistant, a long press turns the frontlight off and on, and the top orange button (`KEY_F12`) opens the Notes-role app; Settings → System → DC-1 buttons changes the actions — neither keycode has a default action in AOSP/LineageOS, see [`docs/buttons.md`](docs/buttons.md) | `DC1KeyHandler/`, `overlay-lineage/` |
 | Display/feature config | monochrome-panel + no-camera/no-light-sensor/no-telephony feature masks, forced grayscale + 1184x1584 size props, drops camera apps; setup wizard kept, its SIM step self-skips | `rro/`, `dc1-excluded-hardware.xml`, `common.mk` |
 | Repo manifest | adds `vendor/dc1` (this repo) to the build tree | `local_manifests/dc1.xml` |
 
